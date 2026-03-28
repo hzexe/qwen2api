@@ -1,6 +1,101 @@
 /**
  * 核心业务逻辑 - 所有平台共用
+ * 
+ * 改动历史：
+ * - 2026-03-28: 新增 thinking/search 后缀路由支持
+ *   参考文档: doc/search-feature/
  */
+
+// ============================================
+// 模型后缀解析 (2026-03-28 新增)
+// ============================================
+
+/**
+ * 迭代剥离模型名后缀，支持多后缀并存
+ * @param {string} rawModel 原始模型名
+ * @returns {{ cleanModel: string, enableThinking: boolean, enableSearch: boolean }}
+ */
+function parseModelSuffix(rawModel) {
+  const flags = { enableThinking: false, enableSearch: false };
+  const SUFFIX_MAP = {
+    '-thinking': () => { flags.enableThinking = true; },
+    '-search':   () => { flags.enableSearch = true; },
+  };
+
+  let model = rawModel;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [suffix, setter] of Object.entries(SUFFIX_MAP)) {
+      if (model.endsWith(suffix)) {
+        setter();
+        model = model.slice(0, -suffix.length);
+        changed = true;
+        break; // 每次只剥一个，重新从头扫
+      }
+    }
+  }
+
+  return { cleanModel: model, ...flags };
+}
+
+/**
+ * 解析 thinking 开关和 budget，按优先级链处理
+ * 优先级：后缀 > enable_thinking > reasoning_effort > 环境变量
+ * @param {object} body 请求体
+ * @param {{ enableThinking: boolean }} suffixFlags 后缀解析结果
+ * @param {object} env 环境变量
+ * @returns {{ thinkingEnabled: boolean, thinkingBudget: number|undefined }}
+ */
+function resolveThinking(body, suffixFlags, env) {
+  // budget 优先级
+  let budget = undefined;
+  if (body.thinking_budget != null) {
+    budget = parseInt(body.thinking_budget);
+  } else if (body.reasoning_effort) {
+    const budgetMap = { low: 2000, medium: 8000, high: 20000 };
+    budget = budgetMap[body.reasoning_effort];
+  } else if (env?.THINKING_BUDGET || process?.env?.THINKING_BUDGET) {
+    budget = parseInt(env?.THINKING_BUDGET || process?.env?.THINKING_BUDGET);
+  }
+
+  // enabled 优先级
+  let enabled;
+  if (suffixFlags.enableThinking) {
+    // 1. model 后缀 -thinking
+    enabled = true;
+  } else if (body.enable_thinking != null) {
+    // 2. Qwen 官方参数
+    enabled = !!body.enable_thinking;
+  } else if (body.reasoning_effort != null) {
+    // 3. OpenAI reasoning_effort
+    enabled = body.reasoning_effort !== 'none';
+  } else {
+    // 4. 环境变量兜底
+    enabled = (env?.ENABLE_THINKING || process?.env?.ENABLE_THINKING || '').toLowerCase() === 'true';
+  }
+
+  return { thinkingEnabled: enabled, thinkingBudget: budget };
+}
+
+/**
+ * 解析 search 开关，双入口控制
+ * 入口1：模型后缀 -search
+ * 入口2：extra_body.enable_search
+ * 兜底：环境变量 ENABLE_SEARCH
+ * @param {object} body 请求体
+ * @param {{ enableSearch: boolean }} suffixFlags 后缀解析结果
+ * @param {object} env 环境变量
+ * @returns {boolean}
+ */
+function resolveSearch(body, suffixFlags, env) {
+  // 入口 1：model 后缀
+  if (suffixFlags.enableSearch) return true;
+  // 入口 2：extra_body.enable_search
+  if (body.extra_body?.enable_search === true) return true;
+  // 兜底：全局环境变量
+  return (env?.ENABLE_SEARCH || process?.env?.ENABLE_SEARCH || '').toLowerCase() === 'true';
+}
 
 // ============================================
 // UUID 生成 (内联，避免 ESM 问题)
@@ -1256,13 +1351,24 @@ async function handleChatCompletions(body, authHeader, env, streamWriter) {
     hasTools: !!(tools && Array.isArray(tools) && tools.length > 0),
   });
 
-  const actualModel = model || 'qwen3.5-plus';
-  const { bxUa, bxUmidToken, bxV } = await getBaxiaTokens();
-
-  // 检查是否启用搜索
-  const enableSearch = (env?.ENABLE_SEARCH || process?.env?.ENABLE_SEARCH || '').toLowerCase() === 'true';
+  // 解析模型后缀，获取 cleanModel 和功能 flag
+  const { cleanModel, enableThinking: suffixThinking, enableSearch: suffixSearch } = parseModelSuffix(model || 'qwen3.5-plus');
+  
+  // 解析 thinking 和 search 开关
+  const { thinkingEnabled, thinkingBudget } = resolveThinking(body, { enableThinking: suffixThinking }, env);
+  const enableSearch = resolveSearch(body, { enableSearch: suffixSearch }, env);
+  
+  const actualModel = cleanModel;
   const chatType = enableSearch ? 'search' : 't2t';
-  logChatDetail('core', 'request.config', { actualModel, chatType, enableSearch });
+  
+  logChatDetail('core', 'request.config', { 
+    rawModel: model, 
+    cleanModel: actualModel, 
+    chatType, 
+    enableSearch, 
+    thinkingEnabled,
+    thinkingBudget 
+  });
 
   // 创建会话
   const createResp = await fetch(`${QWEN_BASE_URL}/api/v2/chats/new`, {
@@ -1337,7 +1443,15 @@ async function handleChatCompletions(body, authHeader, env, streamWriter) {
       messages: [{
         fid: uuidv4(), parentId: null, childrenIds: [uuidv4()], role: 'user', content,
         user_action: 'chat', files: uploadedFiles, timestamp: Date.now(), models: [actualModel], chat_type: chatType,
-        feature_config: { thinking_enabled: true, output_schema: 'phase', research_mode: 'normal', auto_thinking: true, thinking_format: 'summary', auto_search: enableSearch },
+        feature_config: { 
+          thinking_enabled: thinkingEnabled, 
+          output_schema: 'phase', 
+          research_mode: 'normal', 
+          auto_thinking: thinkingEnabled, 
+          thinking_format: 'summary', 
+          auto_search: enableSearch,
+          ...(thinkingBudget != null ? { thinking_budget: thinkingBudget } : {})
+        },
         extra: { meta: { subChatType: chatType } }, sub_chat_type: chatType, parent_id: null
       }],
       timestamp: Date.now()
@@ -1854,14 +1968,25 @@ async function handleChatCompletionsWithLogs(body, authHeader, env, streamWriter
   });
   sendLog('request.received', { model: model || 'qwen3.5-plus', messageCount: messages.length });
 
-  const actualModel = model || 'qwen3.5-plus';
-  const { bxUa, bxUmidToken, bxV } = await getBaxiaTokens();
-
-  // 检查是否启用搜索
-  const enableSearch = (env?.ENABLE_SEARCH || process?.env?.ENABLE_SEARCH || '').toLowerCase() === 'true';
+  // 解析模型后缀，获取 cleanModel 和功能 flag
+  const { cleanModel, enableThinking: suffixThinking, enableSearch: suffixSearch } = parseModelSuffix(model || 'qwen3.5-plus');
+  
+  // 解析 thinking 和 search 开关
+  const { thinkingEnabled, thinkingBudget } = resolveThinking(body, { enableThinking: suffixThinking }, env);
+  const enableSearch = resolveSearch(body, { enableSearch: suffixSearch }, env);
+  
+  const actualModel = cleanModel;
   const chatType = enableSearch ? 'search' : 't2t';
-  logChatDetail('core', 'request.config', { actualModel, chatType, enableSearch });
-  sendLog('config.ready', { model: actualModel, chatType, enableSearch });
+  
+  logChatDetail('core', 'request.config', { 
+    rawModel: model, 
+    cleanModel: actualModel, 
+    chatType, 
+    enableSearch, 
+    thinkingEnabled,
+    thinkingBudget 
+  });
+  sendLog('config.ready', { model: actualModel, chatType, enableSearch, thinkingEnabled });
 
   // 创建会话
   sendLog('chat.creating', {});
@@ -2022,7 +2147,15 @@ async function handleChatCompletionsWithLogs(body, authHeader, env, streamWriter
       messages: [{
         fid: uuidv4(), parentId: null, childrenIds: [uuidv4()], role: 'user', content,
         user_action: 'chat', files: uploadedFiles, timestamp: Date.now(), models: [actualModel], chat_type: chatType,
-        feature_config: { thinking_enabled: true, output_schema: 'phase', research_mode: 'normal', auto_thinking: true, thinking_format: 'summary', auto_search: enableSearch },
+        feature_config: { 
+          thinking_enabled: thinkingEnabled, 
+          output_schema: 'phase', 
+          research_mode: 'normal', 
+          auto_thinking: thinkingEnabled, 
+          thinking_format: 'summary', 
+          auto_search: enableSearch,
+          ...(thinkingBudget != null ? { thinking_budget: thinkingBudget } : {})
+        },
         extra: { meta: { subChatType: chatType } }, sub_chat_type: chatType, parent_id: null
       }],
       timestamp: Date.now()
