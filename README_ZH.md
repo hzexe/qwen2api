@@ -96,17 +96,119 @@ wrangler deploy
 
 另外也兼容消息级 `files` / `attachments` 传参。
 
+## 模型名后缀控制
+
+从 `search` 分支起，支持通过模型名后缀控制 thinking 和 search 功能：
+
+| 后缀 | 功能 | 示例 |
+|------|------|------|
+| `-thinking` | 开启思考模式 | `qwen-plus-thinking` |
+| `-search` | 开启联网搜索 | `qwen-plus-search` |
+| 可叠加 | 同时开启多个功能 | `qwen-plus-thinking-search` |
+
+**后缀解析规则**：
+- 后缀可叠加，顺序无关（`-thinking-search` 和 `-search-thinking` 效果相同）
+- 后缀会被自动剥离，实际上游模型名为纯净模型名
+
+**已知限制**：
+- 阿里云存在真实模型名如 `qwen-max-search`，会被误识别为"开启搜索"
+- 遇到此类模型名时，建议改用参数方式控制（见下文）
+
+## 请求参数
+
+### Thinking 控制
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `enable_thinking` | boolean | Qwen 官方参数，是否开启思考模式 |
+| `thinking_budget` | number | 思考 token 预算（如 2000、8000、20000） |
+| `reasoning_effort` | string | OpenAI 风格参数，可选值：`low` / `medium` / `high` / `none` |
+
+**reasoning_effort 映射**：
+- `low` → thinking_budget=2000
+- `medium` → thinking_budget=8000
+- `high` → thinking_budget=20000
+- `none` → 关闭思考
+
+**优先级链**（从高到低）：
+1. 模型名后缀 `-thinking`
+2. `enable_thinking` 参数
+3. `reasoning_effort` 参数
+4. 环境变量 `ENABLE_THINKING`（兜底）
+
+### Search 控制
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `extra_body.enable_search` | boolean | 是否开启联网搜索 |
+
+**优先级链**（从高到低）：
+1. 模型名后缀 `-search`
+2. `extra_body.enable_search` 参数
+3. 环境变量 `ENABLE_SEARCH`（兜底）
+
+### 示例
+
+```bash
+# 后缀控制 thinking
+curl https://your-domain/v1/chat/completions \
+  -H "Authorization: Bearer your_token" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen-plus-thinking","messages":[{"role":"user","content":"1+1等于几"}]}'
+
+# 参数控制 thinking
+curl https://your-domain/v1/chat/completions \
+  -H "Authorization: Bearer your_token" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen-plus","enable_thinking":true,"messages":[{"role":"user","content":"解释量子纠缠"}]}'
+
+# OpenAI 风格 reasoning_effort
+curl https://your-domain/v1/chat/completions \
+  -H "Authorization: Bearer your_token" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen-plus","reasoning_effort":"high","messages":[{"role":"user","content":"分析中美贸易战"}]}'
+
+# 后缀控制 search
+curl https://your-domain/v1/chat/completions \
+  -H "Authorization: Bearer your_token" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen-plus-search","messages":[{"role":"user","content":"今天北京天气"}]}'
+
+# 参数控制 search
+curl https://your-domain/v1/chat/completions \
+  -H "Authorization: Bearer your_token" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen-plus","extra_body":{"enable_search":true},"messages":[{"role":"user","content":"今天新闻"}]}'
+
+# 同时开启 thinking + search
+curl https://your-domain/v1/chat/completions \
+  -H "Authorization: Bearer your_token" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen-plus-thinking-search","messages":[{"role":"user","content":"今天有什么重要新闻，分析一下"}]}'
+```
+
 ## 环境变量
 
 | 变量名 | 说明 | 必填 |
 |--------|------|------|
 | `API_TOKENS` | API 密钥，多个用逗号分隔 | 否 |
+| `ENABLE_THINKING` | 全局 thinking 开关（`true` 开启，默认关闭），会被请求参数覆盖 | 否 |
+| `THINKING_BUDGET` | 全局 thinking token 预算（会被请求参数覆盖） | 否 |
+| `ENABLE_SEARCH` | 全局 search 开关（`true` 开启，默认关闭），会被请求参数覆盖 | 否 |
 | `CHAT_DETAIL_LOG` | 是否开启详细对话/上传日志（`true/1/on/yes` 开启，默认关闭） | 否 |
 | `JSON_BODY_LIMIT` | Express JSON 请求体大小上限（默认 `20mb`，仅本地/Docker 的 Express 运行时生效） | 否 |
 
-> **注意：** `ENABLE_SEARCH` 已不推荐使用。当前版本仍兼容读取该变量（`true` 时启用 `search`，否则使用 `t2t`），后续版本可能移除，请尽量不要依赖。
->
 > **安全提示（API_TOKENS）：** 如果未配置 `API_TOKENS`，服务将允许无鉴权访问所有接口（`/v1/models`、`/v1/chat/completions` 等）。公网部署时强烈建议设置至少一个 token，并通过 `Authorization: Bearer <token>` 访问。
+
+## 已知限制
+
+1. **真实模型名冲突**：阿里云存在如 `qwen-max-search` 这样的真实模型名，后缀解析会将其误识别为"开启搜索"。遇到此类情况，建议：
+   - 使用 `extra_body.enable_search` 参数控制
+   - 或在请求中明确设置 `enable_thinking: false`
+
+2. **Tool calling 不支持**：项目未实现 OpenAI 风格的工具/函数调用功能。
+
+3. **视频链接分析限制**：不支持无服务器函数部署（Vercel / Netlify Functions / Cloudflare Workers）。
 
 ## 使用方法
 

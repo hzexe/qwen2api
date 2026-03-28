@@ -112,15 +112,121 @@ You can use these message content part formats in `messages[].content` arrays:
 
 The proxy also accepts legacy message-level `files` / `attachments` arrays for compatibility.
 
+## Model Name Suffix Control
+
+Starting from the `search` branch, you can control thinking and search features via model name suffixes:
+
+| Suffix | Feature | Example |
+|--------|---------|---------|
+| `-thinking` | Enable thinking mode | `qwen-plus-thinking` |
+| `-search` | Enable web search | `qwen-plus-search` |
+| Stackable | Combine multiple features | `qwen-plus-thinking-search` |
+
+**Parsing rules**:
+- Suffixes are stackable and order-independent (`-thinking-search` equals `-search-thinking`)
+- Suffixes are automatically stripped, upstream model name is clean
+
+**Known limitation**:
+- Real model names like `qwen-max-search` may be misidentified as "enable search"
+- Use parameter-based control for such models (see below)
+
+## Request Parameters
+
+### Thinking Control
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `enable_thinking` | boolean | Qwen official parameter to enable/disable thinking |
+| `thinking_budget` | number | Thinking token budget (e.g., 2000, 8000, 20000) |
+| `reasoning_effort` | string | OpenAI-style parameter: `low` / `medium` / `high` / `none` |
+
+**reasoning_effort mapping**:
+- `low` → thinking_budget=2000
+- `medium` → thinking_budget=8000
+- `high` → thinking_budget=20000
+- `none` → disable thinking
+
+**Priority chain** (high to low):
+1. Model name suffix `-thinking`
+2. `enable_thinking` parameter
+3. `reasoning_effort` parameter
+4. Environment variable `ENABLE_THINKING` (fallback)
+
+### Search Control
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `extra_body.enable_search` | boolean | Enable web search |
+
+**Priority chain** (high to low):
+1. Model name suffix `-search`
+2. `extra_body.enable_search` parameter
+3. Environment variable `ENABLE_SEARCH` (fallback)
+
+### Examples
+
+```bash
+# Suffix control thinking
+curl https://your-domain/v1/chat/completions \
+  -H "Authorization: Bearer your_token" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen-plus-thinking","messages":[{"role":"user","content":"What is 1+1?"}]}'
+
+# Parameter control thinking
+curl https://your-domain/v1/chat/completions \
+  -H "Authorization: Bearer your_token" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen-plus","enable_thinking":true,"messages":[{"role":"user","content":"Explain quantum entanglement"}]}'
+
+# OpenAI-style reasoning_effort
+curl https://your-domain/v1/chat/completions \
+  -H "Authorization: Bearer your_token" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen-plus","reasoning_effort":"high","messages":[{"role":"user","content":"Analyze trade war"}]}'
+
+# Suffix control search
+curl https://your-domain/v1/chat/completions \
+  -H "Authorization: Bearer your_token" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen-plus-search","messages":[{"role":"user","content":"Today weather in Beijing"}]}'
+
+# Parameter control search
+curl https://your-domain/v1/chat/completions \
+  -H "Authorization: Bearer your_token" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen-plus","extra_body":{"enable_search":true},"messages":[{"role":"user","content":"Today news"}]}'
+
+# Enable both thinking + search
+curl https://your-domain/v1/chat/completions \
+  -H "Authorization: Bearer your_token" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen-plus-thinking-search","messages":[{"role":"user","content":"Analyze today major news"}]}'
+```
+
 ## Environment Variables
 
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `API_TOKENS` | API keys, multiple keys separated by commas | No |
+| `ENABLE_THINKING` | Global thinking switch (`true` to enable, default off), overridden by request params | No |
+| `THINKING_BUDGET` | Global thinking token budget, overridden by request params | No |
+| `ENABLE_SEARCH` | Global search switch (`true` to enable, default off), overridden by request params | No |
 | `CHAT_DETAIL_LOG` | Enable detailed chat/upload logs (`true/1/on/yes` to enable, default off) | No |
 | `JSON_BODY_LIMIT` | Express JSON body size limit (default `20mb`, only for local/Docker Express runtime) | No |
 
-> **Note:** Web search is now enabled by default for all models. The `ENABLE_SEARCH` variable has been deprecated.
+> **Note:** Web search is now controlled per-request via suffix or `extra_body.enable_search`. The `ENABLE_SEARCH` variable acts as a fallback default.
+
+> **Security Note (API_TOKENS):** If `API_TOKENS` is not configured, the service allows unauthenticated access to all endpoints (`/v1/models`, `/v1/chat/completions`, etc.). For public deployments, it's strongly recommended to set at least one token and access via `Authorization: Bearer <token>`.
+
+## Known Limitations
+
+1. **Real model name conflict**: Real model names like `qwen-max-search` may be misidentified as "enable search". Workaround:
+   - Use `extra_body.enable_search` parameter for control
+   - Or explicitly set `enable_thinking: false` in requests
+
+2. **Tool calling not supported**: The project does not implement OpenAI-style tool/function calling.
+
+3. **Video URL analysis limitations**: Not supported on serverless deployments (Vercel / Netlify Functions / Cloudflare Workers).
 
 ## Usage
 
