@@ -1370,6 +1370,9 @@ async function handleChatCompletions(body, authHeader, env, streamWriter) {
     thinkingBudget 
   });
 
+  // 获取 Baxia Token
+  const { bxUa, bxUmidToken, bxV } = await getBaxiaTokens();
+
   // 创建会话
   const createResp = await fetch(`${QWEN_BASE_URL}/api/v2/chats/new`, {
     method: 'POST',
@@ -1987,6 +1990,9 @@ async function handleChatCompletionsWithLogs(body, authHeader, env, streamWriter
     thinkingBudget 
   });
   sendLog('config.ready', { model: actualModel, chatType, enableSearch, thinkingEnabled });
+
+  // 获取 Baxia Token
+  const { bxUa, bxUmidToken, bxV } = await getBaxiaTokens();
 
   // 创建会话
   sendLog('chat.creating', {});
